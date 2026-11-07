@@ -1,0 +1,142 @@
+service: taller-products
+frameworkVersion: '4'
+
+plugins:
+  - serverless-localstack
+
+custom:
+  config: ${file(./config/${sls:stage}.yml)}
+  authorizer:
+    type: CUSTOM
+    authorizerId:
+      Fn::ImportValue: taller-${sls:stage}-main-authorizer-id
+  localstack:
+    stages:
+      - local
+    host: http://localhost
+    edgePort: 4566
+    autostart: false
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  stage: ${opt:stage, 'develop'}
+  region: us-east-1
+  timeout: 15
+  apiGateway:
+    restApiId:
+      Fn::ImportValue: taller-${sls:stage}-main-rest-api-id
+    restApiRootResourceId:
+      Fn::ImportValue: taller-${sls:stage}-main-root-resource-id
+  environment:
+    STAGE: ${sls:stage}
+    PRODUCTS_TABLE: !Ref ProductsTable
+    CORS_ORIGINS: ${self:custom.config.corsOrigins}
+    # Solo se usa en el stage local (LocalStack no ejecuta el authorizer); en AWS va vacío
+    JWT_SECRET: ${self:custom.config.jwtSecret}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+            - dynamodb:Scan
+          Resource:
+            - !GetAtt ProductsTable.Arn
+            - !Join ['/', [!GetAtt ProductsTable.Arn, 'index/*']]
+
+functions:
+  createProduct:
+    handler: src/handlers/create-product.createProduct
+    name: taller-${sls:stage}-products-createProduct
+    events:
+      - http:
+          path: products
+          method: post
+          cors: true
+          authorizer: ${self:custom.authorizer}
+
+  getProduct:
+    handler: src/handlers/get-product.getProduct
+    name: taller-${sls:stage}-products-getProduct
+    events:
+      - http:
+          path: products/{id}
+          method: get
+          cors: true
+
+  updateProduct:
+    handler: src/handlers/update-product.updateProduct
+    name: taller-${sls:stage}-products-updateProduct
+    events:
+      - http:
+          path: products/{id}
+          method: put
+          cors: true
+          authorizer: ${self:custom.authorizer}
+
+  deleteProduct:
+    handler: src/handlers/delete-product.deleteProduct
+    name: taller-${sls:stage}-products-deleteProduct
+    events:
+      - http:
+          path: products/{id}
+          method: delete
+          cors: true
+          authorizer: ${self:custom.authorizer}
+
+  listAllProducts:
+    handler: src/handlers/list-all-products.listAllProducts
+    name: taller-${sls:stage}-products-listAllProducts
+    events:
+      - http:
+          path: products
+          method: get
+          cors: true
+
+  listProductsBySeller:
+    handler: src/handlers/list-products-by-seller.listProductsBySeller
+    name: taller-${sls:stage}-products-listProductsBySeller
+    events:
+      - http:
+          path: products/seller/{sellerId}
+          method: get
+          cors: true
+
+  # La invoca el módulo Orders lambda a lambda, sin pasar por API Gateway
+  updateStock:
+    handler: src/handlers/update-stock.updateStock
+    name: taller-${sls:stage}-products-updateStock
+    events:
+      - http:
+          path: products/{id}/stock
+          method: patch
+          cors: true
+          authorizer: ${self:custom.authorizer}
+
+resources:
+  Resources:
+    ProductsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: taller-${sls:stage}-products
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: productId
+            AttributeType: S
+          - AttributeName: sellerId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: productId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: seller-index
+            KeySchema:
+              - AttributeName: sellerId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
